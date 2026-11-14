@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Sonic Gorilla VR</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; font-family:Arial, sans-serif; color:#fff; touch-action:none; }
+  #game { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #cam { position:fixed; width:2px; height:2px; opacity:0.01; pointer-events:none; }
+  #menu { position:fixed; inset:0; background:linear-gradient(#0a2a6b,#1a7bd8); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; z-index:10; padding:12px; overflow:auto; }
+  #menu h1 { font-size:32px; margin:0 0 6px; color:#ffd400; text-shadow:2px 2px #000; }
+  #menu p { max-width:540px; font-size:14px; line-height:1.35; margin:5px 0; }
+  #status { color:#ffd400; min-height:18px; }
+  button { font-size:18px; padding:10px 20px; margin:6px; border:none; border-radius:12px; background:#ffd400; color:#000; font-weight:bold; }
+  #calib { position:fixed; inset:0; z-index:11; display:none; background:#000; }
+  #calibCanvas { width:100%; height:100%; }
+  #calibMsg { position:fixed; top:6px; left:0; right:0; text-align:center; z-index:12; font-size:15px; text-shadow:1px 1px #000; }
+  #calibBtns { position:fixed; bottom:8px; left:0; right:0; text-align:center; z-index:12; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <h1>SONIC GORILLA VR</h1>
+  <p>Agora o jogo lê a sua mão de verdade pela câmera, sem bolinha. Feche o punho para agarrar o ar e puxe a mão para correr; abra para soltar e voar. Você também empurra o chão e as paredes com as mãos.</p>
+  <p>Colete as argolas, passe pelos checkpoints e bata seu recorde! Durante o jogo: 1 dedo na tela dá impulso, 2 dedos voltam ao menu.</p>
+  <p id="recordTxt"></p>
+  <p id="status"></p>
+  <div>
+  <button id="btnTest">1. Testar mãos</button>
+  <button id="btnPlay">2. Jogar</button>
+  </div>
+  <div>
+  <button id="btnFlip">Inverter lados</button>
+  <button id="btnCam">Trocar câmera</button>
+  <button id="btnFull">Tela cheia</button>
+  </div>
+</div>
+
+<div id="calib">
+  <canvas id="calibCanvas"></canvas>
+</div>
+<div id="calibMsg"></div>
+<div id="calibBtns" style="display:none">
+  <button id="btnFlip2">Inverter lados</button>
+  <button id="btnCam2">Trocar câmera</button>
+  <button id="btnDone">Pronto</button>
+</div>
+
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="game"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)};
+if(typeof THREE==='undefined'||typeof Hands==='undefined'){alert('Sem internet: não consegui carregar o 3D e o rastreio de mãos.');return;}
+var menu=$('menu'),calibEl=$('calib'),cc=$('calibCanvas'),cctx=cc.getContext('2d'),calibMsg=$('calibMsg'),calibBtns=$('calibBtns'),cam=$('cam'),gc=$('game'),stat=$('status');
+var facing='environment',manualFlip=false,camOK=false,playing=false,calibMode=false,gyroOn=false,stream=null,nHands=0;
+var ori={a:0,b:0,g:0,ok:false};
+function showRec(){try{var r=localStorage.getItem('sgvr_rec');if(r)$('recordTxt').textContent='Recorde: '+r+' s';}catch(e){}}
+showRec();
+var BONES=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+/* ---- câmera e rastreio de mãos ---- */
+var hands=null,ready=false,tracking=false,rawHands=[];
+function flipEff(){return (facing==='user')!==manualFlip;}
+function onRes(r){rawHands=r.multiHandLandmarks||[];}
+async function initHands(){
+if(ready)return true;
+stat.textContent='Carregando o rastreio de mãos (precisa de internet, pode demorar)...';
+try{
+hands=new Hands({locateFile:function(f){return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/'+f;}});
+hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+hands.onResults(onRes);
+await hands.initialize();
+ready=true;stat.textContent='Rastreio de mãos pronto.';return true;
+}catch(e){stat.textContent='';alert('Não consegui carregar o rastreio de mãos. Confira a internet e tente de novo.');return false;}}
+async function startCam(){
+if(stream){stream.getTracks().forEach(function(t){t.stop();});stream=null;camOK=false;}
+try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing},width:{ideal:640},height:{ideal:480}},audio:false});
+cam.srcObject=stream;await cam.play();camOK=true;return true;}
+catch(e){alert('Não consegui abrir a câmera. Permita o acesso à câmera e tente de novo.');return false;}}
+function trackLoop(){
+if(!(playing||calibMode)){tracking=false;return;}
+if(cam.readyState>=2){hands.send({image:cam}).then(function(){requestAnimationFrame(trackLoop);}).catch(function(){setTimeout(trackLoop,100);});}
+else requestAnimationFrame(trackLoop);}
+function startTrack(){if(!tracking){tracking=true;trackLoop();}}
+function eff(){
+var f=flipEff(),res=[];
+rawHands.forEach(function(L){res.push(L.map(function(p){return{x:f?1-p.x:p.x,y:p.y};}));});
+res.sort(function(a,b){return a[0].x-b[0].x;});
+var out=[null,null];
+if(res.length>=2){out[0]=res[0];out[1]=res[1];}
+else if(res.length===1){if(res[0][0].x<0.5)out[0]=res[0];else out[1]=res[0];}
+return out;}
+async function startGyro(){
+if(typeof DeviceOrientationEvent!=='undefined'&&DeviceOrientationEvent.requestPermission){try{await DeviceOrientationEvent.requestPermission();}catch(e){}}
+if(gyroOn)return;gyroOn=true;
+window.addEventListener('deviceorientation',function(e){if(e.alpha==null)return;ori.a=e.alpha;ori.b=e.beta;ori.g=e.gamma;ori.ok=true;});}
+
+/* ---- tela de teste das mãos ---- */
+function calibLoop(){if(!calibMode)return;
+cc.width=calibEl.clientWidth;cc.height=calibEl.clientHeight;
+cctx.save();if(flipEff()){cctx.translate(cc.width,0);cctx.scale(-1,1);}
+cctx.drawImage(cam,0,0,cc.width,cc.height);cctx.restore();
+var E=eff();
+[0,1].forEach(function(s){var L=E[s];if(!L)return;
+cctx.strokeStyle=s?'#ff4040':'#40a0ff';cctx.fillStyle=cctx.strokeStyle;cctx.lineWidth=3;
+BONES.forEach(function(b){cctx.beginPath();cctx.moveTo(L[b[0]].x*cc.width,L[b[0]].y*cc.height);cctx.lineTo(L[b[1]].x*cc.width,L[b[1]].y*cc.height);cctx.stroke();});
+L.forEach(function(p){cctx.beginPath();cctx.arc(p.x*cc.width,p.y*cc.height,4,0,7);cctx.fill();});});
+calibMsg.textContent='Mostre as mãos para a câmera. Direita = vermelho, esquerda = azul. Se estiver trocado, toque em Inverter lados.';
+requestAnimationFrame(calibLoop);}
+function doFlip(){manualFlip=!manualFlip;stat.textContent='Lados invertidos: '+(manualFlip?'sim':'não');}
+async function doCam(){facing=(facing==='environment')?'user':'environment';rawHands=[];if(camOK)await startCam();stat.textContent='Câmera: '+(facing==='environment'?'de trás':'da frente');}
+$('btnFlip').onclick=doFlip;$('btnFlip2').onclick=doFlip;
+$('btnCam').onclick=doCam;$('btnCam2').onclick=doCam;
+$('btnTest').onclick=async function(){
+if(!await initHands())return;
+if(!await startCam())return;
+menu.style.display='none';calibEl.style.display='block';calibBtns.style.display='block';
+calibMode=true;startTrack();calibLoop();};
+$('btnDone').onclick=function(){calibMode=false;calibEl.style.display='none';calibBtns.style.display='none';calibMsg.textContent='';menu.style.display='flex';};
+$('btnFull').onclick=function(){var el=document.documentElement;if(el.requestFullscreen)el.requestFullscreen().then(function(){if(screen.orientation&&screen.orientation.lock)screen.orientation.lock('landscape').catch(function(){});}).catch(function(){});};
+
+/* ---- mundo 3D ---- */
+var R=new THREE.WebGLRenderer({canvas:gc});R.setPixelRatio(1);
+var scene=new THREE.Scene();scene.background=new THREE.Color(0x4aa8ff);scene.fog=new THREE.Fog(0x4aa8ff,40,160);
+scene.add(new THREE.HemisphereLight(0xffffff,0x3a7a2a,1.1));
+var camera=new THREE.PerspectiveCamera(75,1,0.05,300);
+function checker(a,b){var c=document.createElement('canvas');c.width=c.height=64;var x=c.getContext('2d');x.fillStyle=a;x.fillRect(0,0,64,64);x.fillStyle=b;x.fillRect(0,0,32,32);x.fillRect(32,32,32,32);var t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;return t;}
+var texG=checker('#2e9e3a','#23802d'),texP=checker('#d98a2b','#b06a1c'),texW=checker('#8a8aa0','#6e6e84');
+var boxes=[],rings=[],cps=[],plats=[];
+function addBox(x,y,z,w,h,d,tex){var t=tex.clone();t.needsUpdate=true;t.repeat.set(Math.max(1,w/3),Math.max(1,d/3));
+var m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),new THREE.MeshLambertMaterial({map:t}));m.position.set(x,y,z);scene.add(m);
+boxes.push({x0:x-w/2,x1:x+w/2,y0:y-h/2,y1:y+h/2,z0:z-d/2,z1:z+d/2});}
+addBox(0,-0.5,-8,20,1,36,texG);
+addBox(-11,3,-8,1,6,36,texW);addBox(11,3,-8,1,6,36,texW);
+for(var i=0;i<13;i++){var px=Math.sin(i*1.1)*7,pt=Math.sin(i*0.7)*2.2,pz=-33-i*9;addBox(px,pt-0.5,pz,7,1,7,texP);plats.push({x:px,top:pt,z:pz});}
+addBox(0,0,-150,14,1,14,texP);plats.push({x:0,top:0.5,z:-150});
+var rg=new THREE.TorusGeometry(0.5,0.1,8,16),rm=new THREE.MeshBasicMaterial({color:0xffd400});
+function addRing(x,y,z){var m=new THREE.Mesh(rg,rm);m.position.set(x,y,z);scene.add(m);rings.push(m);}
+for(i=0;i<4;i++)addRing(0,1.8,-5-i*7);
+plats.forEach(function(p,k){addRing(p.x-1.5,p.top+1.6,p.z);addRing(p.x,p.top+1.6,p.z);addRing(p.x+1.5,p.top+1.6,p.z);
+if(k<plats.length-1){var q=plats[k+1];addRing((p.x+q.x)/2,Math.max(p.top,q.top)+3,(p.z+q.z)/2);}});
+function addCP(p){var pil=new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.12,3,8),new THREE.MeshBasicMaterial({color:0xcccccc}));pil.position.set(p.x,p.top+1.5,p.z);scene.add(pil);
+var fl=new THREE.Mesh(new THREE.BoxGeometry(1.2,0.7,0.05),new THREE.MeshBasicMaterial({color:0xff2020}));fl.position.set(p.x+0.6,p.top+2.6,p.z);scene.add(fl);
+cps.push({p:new THREE.Vector3(p.x,p.top,p.z),flag:fl,done:false});}
+addCP(plats[3]);addCP(plats[7]);addCP(plats[11]);addCP(plats[13]);
+
+/* ---- jogador e mãos 3D ---- */
+var pos=new THREE.Vector3(0,1.2,0),vel=new THREE.Vector3(),respawn=new THREE.Vector3(0,1.2,0),camQ=new THREE.Quaternion();
+var time=0,count=0,fin=false,msgT=0,msgTxt='',last=0,a0=0;
+function say(t,s){msgTxt=t;msgT=s;}
+function mkHand(color){
+var lg=new THREE.BufferGeometry();lg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(BONES.length*6),3));
+var lines=new THREE.LineSegments(lg,new THREE.LineBasicMaterial({color:color}));lines.frustumCulled=false;lines.visible=false;scene.add(lines);
+var pg=new THREE.BufferGeometry();pg.setAttribute('position',new THREE.BufferAttribute(new Float32Array(63),3));
+var pts=new THREE.Points(pg,new THREE.PointsMaterial({color:0xffffff,size:0.03}));pts.frustumCulled=false;pts.visible=false;scene.add(pts);
+return{lines:lines,pts:pts,base:color,pl:new THREE.Vector3(),dep:0.5,has:false,grab:false,contact:false,sm:null};}
+var H=[mkHand(0x40a0ff),mkHand(0xff4040)];
+var zee=new THREE.Vector3(0,0,1),eu=new THREE.Euler(),q0=new THREE.Quaternion(),q1=new THREE.Quaternion(-Math.sqrt(0.5),0,0,Math.sqrt(0.5));
+function scrAng(){var a=(screen.orientation&&screen.orientation.angle!=null)?screen.orientation.angle:(window.orientation||0);return a*Math.PI/180;}
+function updQ(){if(!ori.ok){camQ.set(0,0,0,1);return;}var D=Math.PI/180;eu.set(ori.b*D,(ori.a-a0)*D,-ori.g*D,'YXZ');camQ.setFromEuler(eu);camQ.multiply(q1);camQ.multiply(q0.setFromAxisAngle(zee,-scrAng()));}
+function inBox(p,m){for(var i=0;i<boxes.length;i++){var b=boxes[i];if(p.x>b.x0-m&&p.x<b.x1+m&&p.y>b.y0-m&&p.y<b.y1+m&&p.z>b.z0-m&&p.z<b.z1+m)return true;}return false;}
+var RB=0.45,nrm=new THREE.Vector3();
+function bodyCollide(){var grounded=false;for(var i=0;i<boxes.length;i++){var b=boxes[i];
+var cx=Math.max(b.x0,Math.min(pos.x,b.x1)),cy=Math.max(b.y0,Math.min(pos.y,b.y1)),cz=Math.max(b.z0,Math.min(pos.z,b.z1));
+nrm.set(pos.x-cx,pos.y-cy,pos.z-cz);var l=nrm.length();
+if(l<RB){if(l>1e-4){nrm.divideScalar(l);}else{nrm.set(0,1,0);pos.y=b.y1;l=0;}
+pos.addScaledVector(nrm,RB-l);var vn=vel.dot(nrm);if(vn<0)vel.addScaledVector(nrm,-vn);if(nrm.y>0.5)grounded=true;}}
+return grounded;}
+function finish(){fin=true;var txt='Tempo: '+time.toFixed(1)+' s';
+try{var r=parseFloat(localStorage.getItem('sgvr_rec'));if(!r||time<r){localStorage.setItem('sgvr_rec',time.toFixed(1));txt+=' - RECORDE!';}}catch(e){}
+say(txt,5);setTimeout(back,5000);}
+var tv=new THREE.Vector3(),pcl=new THREE.Vector3(),asp=0.75;
+function d2(a,b){var dx=a.x-b.x,dy=(a.y-b.y)*asp;return Math.sqrt(dx*dx+dy*dy);}
+function drawHands(){
+for(var s=0;s<2;s++){var h=H[s];if(!h.has||!h.sm)continue;
+var P=h.sm,W=1.1*h.dep,k;
+var pa=h.pts.geometry.attributes.position.array;
+for(k=0;k<21;k++){tv.set((P[k].x-0.5)*W,(0.5-P[k].y)*W*asp,-h.dep).applyQuaternion(camQ).add(pos);pa[k*3]=tv.x;pa[k*3+1]=tv.y;pa[k*3+2]=tv.z;}
+var la=h.lines.geometry.attributes.position.array;
+for(k=0;k<BONES.length;k++){var a=BONES[k][0]*3,b=BONES[k][1]*3;la[k*6]=pa[a];la[k*6+1]=pa[a+1];la[k*6+2]=pa[a+2];la[k*6+3]=pa[b];la[k*6+4]=pa[b+1];la[k*6+5]=pa[b+2];}
+h.pts.geometry.attributes.position.needsUpdate=true;h.lines.geometry.attributes.position.needsUpdate=true;
+h.lines.material.color.setHex(h.grab?0xffd400:h.base);h.lines.visible=true;h.pts.visible=true;}}
+function update(dt){
+updQ();
+asp=(cam.videoWidth?cam.videoHeight/cam.videoWidth:0.75);
+var E=eff(),anyGrab=false,nh=0,s,i,k;
+for(s=0;s<2;s++){
+var h=H[s],L=E[s];
+if(!L){h.has=false;h.grab=false;h.contact=false;h.lines.visible=false;h.pts.visible=false;h.sm=null;continue;}
+nh++;
+if(!h.sm)h.sm=L.map(function(p){return{x:p.x,y:p.y};});
+else for(k=0;k<21;k++){h.sm[k].x+=(L[k].x-h.sm[k].x)*0.55;h.sm[k].y+=(L[k].y-h.sm[k].y)*0.55;}
+var P=h.sm,palm=Math.max(0.02,d2(P[9],P[0]));
+var dep=Math.max(0.25,Math.min(1.0,0.09/(palm*1.1)));
+var tipAvg=(d2(P[8],P[0])+d2(P[12],P[0])+d2(P[16],P[0])+d2(P[20],P[0]))/4/palm;
+var grab=h.grab?(tipAvg<1.7):(tipAvg<1.45);
+var W=1.1*dep;
+pcl.set(0,0,-dep);
+[0,5,9,13,17].forEach(function(q){pcl.x+=(P[q].x-0.5)*W/5;pcl.y+=(0.5-P[q].y)*W*asp/5;});
+var pw=pcl.clone().applyQuaternion(camQ).add(pos);
+var inside=inBox(pw,0.2),contact=grab||inside;
+if(contact&&h.contact&&h.has){var push=h.pl.clone().sub(pcl).applyQuaternion(camQ).multiplyScalar(1.8);var pm=push.length();if(pm>0.6)push.multiplyScalar(0.6/pm);pos.add(push);vel.lerp(push.divideScalar(Math.max(dt,0.001)),0.5);}
+h.pl.copy(pcl);h.dep=dep;h.contact=contact;h.grab=grab;h.has=true;if(grab)anyGrab=true;}
+nHands=nh;
+vel.y-=(anyGrab?3:14)*dt;
+var sp=vel.length();if(sp>18)vel.multiplyScalar(18/sp);
+pos.addScaledVector(vel,dt);
+if(bodyCollide()){var f=Math.max(0,1-3*dt);vel.x*=f;vel.z*=f;}else{var f2=1-0.2*dt;vel.x*=f2;vel.z*=f2;}
+for(i=0;i<rings.length;i++){var r=rings[i];if(r.visible){r.rotation.y+=dt*3;if(pos.distanceTo(r.position)<1.3){r.visible=false;count++;}}}
+for(i=0;i<cps.length;i++){var c=cps[i];if(!c.done&&pos.distanceTo(c.p)<3.5){c.done=true;c.flag.material.color.set(0x20ff20);respawn.copy(c.p);respawn.y+=1.5;if(i===cps.length-1)finish();else say('Checkpoint!',1.5);}}
+if(pos.y<-25){pos.copy(respawn);vel.set(0,0,0);}
+if(!fin)time+=dt;
+if(msgT>0)msgT-=dt;
+drawHands();}
+
+/* ---- tela, HUD e VR de duas telas ---- */
+var hud=document.createElement('canvas');hud.style.cssText='position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:5';document.body.appendChild(hud);
+var hx=hud.getContext('2d');
+function resize(){var w=innerWidth,h=innerHeight;R.setSize(w,h,false);hud.width=w;hud.height=h;}
+addEventListener('resize',resize);
+function render(){var w=innerWidth,h=innerHeight;R.setScissorTest(true);
+for(var e=0;e<2;e++){var vx=e*w/2;R.setViewport(vx,0,w/2,h);R.setScissor(vx,0,w/2,h);camera.aspect=(w/2)/h;camera.updateProjectionMatrix();camera.position.copy(pos);camera.quaternion.copy(camQ);camera.translateX((e?1:-1)*0.032);R.render(scene,camera);}
+hx.clearRect(0,0,w,h);hx.fillStyle='#fff';hx.strokeStyle='#000';hx.lineWidth=4;hx.font='bold '+Math.round(h/18)+'px Arial';hx.textAlign='center';
+var cd=cps.filter(function(k){return k.done}).length;
+for(e=0;e<2;e++){var cx=w/4+e*w/2;var t=time.toFixed(1)+'s   ◎ '+count+'/'+rings.length+'   ⚑ '+cd+'/'+cps.length+'   ✋ '+nHands;
+hx.strokeText(t,cx,h*0.12);hx.fillText(t,cx,h*0.12);
+if(msgT>0){hx.strokeText(msgTxt,cx,h*0.5);hx.fillText(msgTxt,cx,h*0.5);}}}
+
+/* ---- começar, voltar, controles ---- */
+function startGame(){pos.set(0,1.2,0);vel.set(0,0,0);respawn.set(0,1.2,0);time=0;count=0;fin=false;msgT=0;
+rings.forEach(function(r){r.visible=true});cps.forEach(function(c){c.done=false;c.flag.material.color.set(0xff2020)});
+a0=ori.ok?ori.a:0;H.forEach(function(h){h.has=false;h.grab=false;h.contact=false;h.sm=null;h.lines.visible=false;h.pts.visible=false;});
+resize();menu.style.display='none';playing=true;last=performance.now();startTrack();
+say('Mostre as mãos! Punho fechado = agarrar',3);}
+$('btnPlay').onclick=async function(){await startGyro();if(!await initHands())return;if(!camOK&&!await startCam())return;startGame();};
+function back(){playing=false;hx.clearRect(0,0,hud.width,hud.height);menu.style.display='flex';showRec();}
+gc.addEventListener('touchstart',function(e){if(!playing)return;e.preventDefault();if(e.touches.length>=2){back();return;}
+var f=new THREE.Vector3(0,0,-1).applyQuaternion(camQ);f.y=0;if(f.lengthSq()<1e-4)return;f.normalize();vel.addScaledVector(f,10);vel.y=Math.max(vel.y,4);},{passive:false});
+function loop(t){requestAnimationFrame(loop);if(!playing)return;var dt=Math.min(0.033,(t-last)/1000);last=t;update(dt);render();}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
